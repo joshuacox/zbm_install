@@ -1,0 +1,286 @@
+#!/bin/sh
+set -eu
+. .env
+source /etc/os-release
+export ID
+
+echo YOURHOSTNAME = ${YOURHOSTNAME}
+echo BOOT_DISK = ${BOOT_DISK}
+echo POOL_DISK = ${POOL_DISK}
+echo BOOT_PART = ${BOOT_PART}
+echo POOL_PART = ${POOL_PART}
+echo BOOT_DEVICE = ${BOOT_DEVICE}
+echo POOL_DEVICE = ${POOL_DEVICE}
+echo ZHOSTID = ${ZHOSTID}
+
+if [ -z ${SomeKeyphrase} ]; then
+  echo "SomeKeyphrase not defined!"
+  exit 1
+else
+  mkdir -p /etc/zfs
+  echo ${SomeKeyphrase} > /etc/zfs/zroot.key
+  chmod 000 /etc/zfs/zroot.key
+fi
+
+unmounter () {
+  set -eux
+  cut -f2 -d" " /proc/mounts | grep ^/mnt | tac | while read i; do umount -l $i; done
+  zpool export zroot
+}
+
+alpine_repo_prep () {
+# breaking indent for cat EOF
+cat <<EOF > /etc/apk/repositories
+http://dl-cdn.alpinelinux.org/alpine/latest-stable/main/
+https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/
+EOF
+  setup-interfaces -ar
+  apk update
+  apk add zfs zfs-scripts sgdisk wipefs
+  modprobe zfs
+}
+
+debian_repo_prep () {
+# breaking indent for cat EOF
+cat <<EOF > /etc/apt/sources.list
+deb http://deb.debian.org/debian bookworm main non-free-firmware contrib
+deb-src http://deb.debian.org/debian bookworm main non-free-firmware contrib
+EOF
+  apt update
+  apt install -yq debootstrap gdisk dkms linux-headers-$(uname -r)
+  apt install -yq zfsutils-linux
+}
+
+repo_check () {
+  if   [ ${ID} = 'alpine' ]; then
+    alpine_repo_prep
+  elif [ ${ID} = 'debian' ]; then
+    debian_repo_prep
+  fi
+}
+
+blk_stuff () {
+  zpool labelclear -f "${POOL_DISK}"
+
+  wipefs -a "${POOL_DISK}"
+  wipefs -a "${BOOT_DISK}"
+
+  sgdisk --zap-all "${POOL_DISK}"
+  sgdisk --zap-all "${BOOT_DISK}"
+
+  sgdisk -n "${BOOT_PART}:1m:+512m" -t "${BOOT_PART}:ef00" "${BOOT_DISK}"
+  sgdisk -n "${POOL_PART}:0:-10m" -t "${POOL_PART}:bf00" "${POOL_DISK}"
+
+  mdev -s
+}
+
+zfs_create_pool () {
+  zpool create -f -o ashift=12 \
+    -O compression=zstd \
+    -O acltype=posixacl \
+    -O xattr=sa \
+    -O relatime=on \
+    -O encryption=aes-256-gcm \
+    -O keylocation=file:///etc/zfs/zroot.key \
+    -O keyformat=passphrase \
+    -o autotrim=on \
+    -o compatibility=openzfs-2.1-linux \
+    -m none zroot "${POOL_DEVICE}"
+  zfs create -o mountpoint=none zroot/ROOT
+  zfs create -o mountpoint=/home zroot/home
+}
+
+zfs_import () {
+  zpool import -f -N -R /mnt zroot
+  zfs load-key -L prompt zroot
+}
+zfs_export () {
+  zpool export zroot
+}
+
+zfs_create_mounts () {
+  zfs create -o mountpoint=/ -o canmount=noauto zroot/ROOT/${ID}
+  zpool set bootfs=zroot/ROOT/${ID} zroot
+
+  zfs_export
+  zfs_import
+  do_mounts
+}
+
+do_mounts () {
+  zfs mount zroot/ROOT/${ID}
+  zfs mount zroot/home
+}
+install_os () {
+  mount | grep mnt
+  if   [ ${ID} = 'alpine' ]; then
+    alpine_install
+  elif [ ${ID} = 'debian' ]; then
+    debian_install
+  fi
+  echo "${YOURHOSTNAME}" > /mnt/etc/hostname
+  echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
+}
+
+mkfs_and_mount_boot () {
+  mkdir -p /mnt/boot/efi
+  mkfs.vfat -F32 "${BOOT_DEVICE}"
+  mount "${BOOT_DEVICE}" /mnt/boot/efi
+}
+
+copy_install_dirs () {
+  zgenhostid -f ${ZHOSTID}
+  cp /etc/hostid /mnt/etc
+  cp /etc/resolv.conf /mnt/etc
+  if   [ ${ID} = 'alpine' ]; then
+    cp /etc/apk/repositories /mnt/etc/apk
+    cp /etc/network/interfaces /mnt/etc/network
+  elif [ ${ID} = 'debian' ]; then
+# breaking indent for cat EOF
+cat <<EOF > /mnt/etc/apt/sources.list
+deb http://deb.debian.org/debian bookworm main non-free non-free-firmware contrib
+deb-src http://deb.debian.org/debian bookworm main non-free non-free-firmware contrib
+deb http://deb.debian.org/debian-security bookworm-security main non-free non-free-firmware contrib
+deb-src http://deb.debian.org/debian-security/ bookworm-security main non-free non-free-firmware contrib
+deb http://deb.debian.org/debian bookworm-updates main non-free non-free-firmware contrib
+deb-src http://deb.debian.org/debian bookworm-updates main non-free non-free-firmware contrib
+deb http://deb.debian.org/debian bookworm-backports main non-free non-free-firmware contrib
+deb-src http://deb.debian.org/debian bookworm-backports main non-free non-free-firmware contrib
+EOF
+  fi
+  mkdir -p /mnt/etc/zfs
+  cp /etc/zfs/zroot.key /mnt/etc/zfs
+# breaking indent for cat EOF
+cat << EOF >> /mnt/etc/fstab
+${BOOT_DEVICE} /boot/efi vfat defaults 0 0
+EOF
+
+}
+
+debian_install () {
+  udevadm trigger
+  debootstrap bookworm /mnt
+  copy_install_dirs
+}
+
+alpine_install () {
+  apk --arch x86_64 \
+   -X http://dl-cdn.alpinelinux.org/alpine/latest-stable/main \
+   -U --allow-untrusted \
+   --root /mnt \
+   --initdb add alpine-base
+  copy_install_dirs
+}
+
+debian_prep_chroot () {
+  mount -t proc proc /mnt/proc
+  mount -t sysfs sys /mnt/sys
+  mount -B /dev /mnt/dev
+  mount -t devpts pts /mnt/dev/pts
+  #chroot /mnt /bin/bash
+}
+
+alpine_prep_chroot () {
+  mount --rbind /dev /mnt/dev
+  mount --rbind /sys /mnt/sys
+  mount --rbind /proc /mnt/proc
+  #chroot /mnt
+}
+
+prep_chroot () {
+  mount | grep mnt
+  if   [ ${ID} = 'alpine' ]; then
+    alpine_prep_chroot
+  elif [ ${ID} = 'debian' ]; then
+    debian_prep_chroot
+  fi
+  echo "${YOURHOSTNAME}" > /mnt/etc/hostname
+  echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
+}
+
+mk_debian_finish () {
+
+# breaking indent for cat EOF
+cat <<EOF > /mnt/finish.sh
+passwd
+
+apt-get update
+apt install -yq locales keyboard-configuration console-setup curl
+dpkg-reconfigure locales tzdata keyboard-configuration console-setup
+apt install -yq linux-headers-amd64 linux-image-amd64 zfs-initramfs dosfstools
+echo "REMAKE_INITRD=yes" > /etc/dkms/zfs.conf
+
+systemctl enable zfs.target
+systemctl enable zfs-import-cache
+systemctl enable zfs-mount
+systemctl enable zfs-import.target
+
+echo "UMASK=0077" > /etc/initramfs-tools/conf.d/umask.conf
+update-initramfs -c -k all
+
+zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
+EOF
+  echo need to run finish.sh
+}
+mk_alpine_finish () {
+ 
+# breaking indent for cat EOF
+cat <<EOF > /mnt/finish.sh
+passwd
+
+rc-update add hwdrivers sysinit
+rc-update add networking
+rc-update add hostname
+
+apk add zfs zfs-lts curl efibootmgr
+rc-update add zfs-import sysinit
+rc-update add zfs-mount sysinit
+
+echo "/etc/hostid" >> /etc/mkinitfs/features.d/zfshost.files
+echo "/etc/zfs/zroot.key" >> /etc/mkinitfs/features.d/zfshost.files
+echo 'features="ata base keymap kms mmc scsi usb virtio nvme zfs zfshost"' > /etc/mkinitfs/mkinitfs.conf
+mkinitfs -c /etc/mkinitfs/mkinitfs.conf "$(ls /mnt/lib/modules)"
+zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
+EOF
+  echo need to run finish.sh
+}
+
+efi_boot_mgr_setup () {
+  mkdir -p /boot/efi/EFI/ZBM
+  curl -o /boot/efi/EFI/ZBM/VMLINUZ.EFI -L https://get.zfsbootmenu.org/efi
+  cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
+  echo efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
+    -L "ZFSBootMenu (Backup)" \
+    -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
+  echo efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
+    -L "ZFSBootMenu" \
+    -l '\EFI\ZBM\VMLINUZ.EFI'
+}
+
+mk_chooser_finish () {
+  mount | grep mnt
+  if   [ ${ID} = 'alpine' ]; then
+    mk_alpine_finish
+  elif [ ${ID} = 'debian' ]; then
+    mk_debian_finish
+  fi
+}
+
+set -x
+repo_check
+
+# blk_stuff
+#zfs_create_pool
+#zfs_export
+#zfs_import
+#zfs_create_mounts
+#do_mounts
+#install_os
+#prep_chroot
+#mk_chooser_finish
+# mkfs_and_mount_boot
+# efi_boot_mgr_setup
+
+#chroot /mnt

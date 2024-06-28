@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eux
+cut -f2 -d" " /proc/mounts | grep ^/mnt | tac | while read i; do umount -l $i; done
+zpool export zroot
