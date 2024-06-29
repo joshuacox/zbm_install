@@ -3,7 +3,17 @@ set -eu
 . .env
 source /etc/os-release
 export ID
+if   [ ${ID} = 'alpine' ]; then
+  this_chroot_bin="chroot"
+elif [ ${ID} = 'arch' ]; then
+  this_chroot_bin="arch-chroot"
+elif [ ${ID} = 'debian' ]; then
+  this_chroot_bin="chroot"
+fi
 
+# echo out some of our vars 
+# to ensure they are set now 
+# before doing anything else
 echo YOURHOSTNAME = ${YOURHOSTNAME}
 echo BOOT_DISK = ${BOOT_DISK}
 echo POOL_DISK = ${POOL_DISK}
@@ -285,27 +295,33 @@ mk_chooser_finish () {
   mount | grep mnt
   if   [ ${ID} = 'alpine' ]; then
     mk_alpine_finish
+    this_chroot_bin="chroot"
   elif [ ${ID} = 'arch' ]; then
     mk_arch_finish
+    this_chroot_bin="arch-chroot"
   elif [ ${ID} = 'debian' ]; then
     mk_debian_finish
+    this_chroot_bin="chroot"
   fi
-  echo Now you need to run finish.sh in chroot
+  chmod +x /mnt/finish.sh
+  echo "Now you need to run finish.sh in a chroot e.g. '$this_chroot_bin /mnt'"
+  $this_chroot_bin /mnt
 }
 
 set -x
-repo_check
 
+repo_check
 # blk_stuff
-#zfs_create_pool
-#zfs_export
-#zfs_import
-#zfs_create_mounts
-#do_mounts
-#install_os
-#prep_chroot
-#mk_chooser_finish
+# zfs_create_pool
+# zfs_export
+# zfs_import
+# zfs_create_mounts
+# do_mounts
+# install_os
+# prep_chroot
+# mk_chooser_finish
 # mkfs_and_mount_boot
 # efi_boot_mgr_setup
 
-#chroot /mnt
+# chroot /mnt
+# unmounter
