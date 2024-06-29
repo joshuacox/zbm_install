@@ -54,6 +54,9 @@ EOF
 repo_check () {
   if   [ ${ID} = 'alpine' ]; then
     alpine_repo_prep
+  elif [ ${ID} = 'arch' ]; then
+    pacman -Sy
+    curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
   elif [ ${ID} = 'debian' ]; then
     debian_repo_prep
   fi
@@ -111,16 +114,6 @@ do_mounts () {
   zfs mount zroot/ROOT/${ID}
   zfs mount zroot/home
 }
-install_os () {
-  mount | grep mnt
-  if   [ ${ID} = 'alpine' ]; then
-    alpine_install
-  elif [ ${ID} = 'debian' ]; then
-    debian_install
-  fi
-  echo "${YOURHOSTNAME}" > /mnt/etc/hostname
-  echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
-}
 
 mkfs_and_mount_boot () {
   mkdir -p /mnt/boot/efi
@@ -154,13 +147,30 @@ EOF
 cat << EOF >> /mnt/etc/fstab
 ${BOOT_DEVICE} /boot/efi vfat defaults 0 0
 EOF
+}
 
+install_os () {
+  mount | grep mnt
+  if   [ ${ID} = 'alpine' ]; then
+    alpine_install
+  elif [ ${ID} = 'arch' ]; then
+    arch_install
+  elif [ ${ID} = 'debian' ]; then
+    debian_install
+  fi
+  copy_install_dirs
+  echo "${YOURHOSTNAME}" > /mnt/etc/hostname
+  echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
 }
 
 debian_install () {
   udevadm trigger
   debootstrap bookworm /mnt
-  copy_install_dirs
+}
+
+arch_install () {
+  pacstrap -K /mnt base linux linux-firmware vim networkmanager rsync git man-db man-pages texinfo
+  genfstab -U /mnt >> /mnt/etc/fstab
 }
 
 alpine_install () {
@@ -169,7 +179,6 @@ alpine_install () {
    -U --allow-untrusted \
    --root /mnt \
    --initdb add alpine-base
-  copy_install_dirs
 }
 
 debian_prep_chroot () {
@@ -191,11 +200,11 @@ prep_chroot () {
   mount | grep mnt
   if   [ ${ID} = 'alpine' ]; then
     alpine_prep_chroot
+  elif [ ${ID} = 'arch' ]; then
+    echo 'skipping as arch has arch-chroot'
   elif [ ${ID} = 'debian' ]; then
     debian_prep_chroot
   fi
-  echo "${YOURHOSTNAME}" > /mnt/etc/hostname
-  echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
 }
 
 mk_debian_finish () {
@@ -221,8 +230,22 @@ update-initramfs -c -k all
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
-  echo need to run finish.sh
 }
+
+mk_arch_finish () {
+cat << EOF >> /mnt/finish.sh
+#!/bin/sh
+ln -sf /usr/share/zoneinfo/Region/City /etc/localtime
+hwclock --systohc
+printf 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+locale-gen
+printf 'LANG=en_US.UTF-8' >> /etc/locale.conf
+touch /etc/vconsole.conf
+mkinitcpio -P
+passwd
+EOF
+}
+
 mk_alpine_finish () {
  
 # breaking indent for cat EOF
@@ -244,7 +267,6 @@ mkinitfs -c /etc/mkinitfs/mkinitfs.conf "$(ls /mnt/lib/modules)"
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
-  echo need to run finish.sh
 }
 
 efi_boot_mgr_setup () {
@@ -263,9 +285,12 @@ mk_chooser_finish () {
   mount | grep mnt
   if   [ ${ID} = 'alpine' ]; then
     mk_alpine_finish
+  elif [ ${ID} = 'arch' ]; then
+    mk_arch_finish
   elif [ ${ID} = 'debian' ]; then
     mk_debian_finish
   fi
+  echo Now you need to run finish.sh in chroot
 }
 
 set -x
