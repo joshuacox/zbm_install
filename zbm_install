@@ -221,30 +221,27 @@ mk_debian_finish () {
 
 # breaking indent for cat EOF
 cat <<EOF > /mnt/finish.sh
+#!/bin/bash
 passwd
-
 apt-get update
 apt install -yq locales keyboard-configuration console-setup curl
 dpkg-reconfigure locales tzdata keyboard-configuration console-setup
 apt install -yq linux-headers-amd64 linux-image-amd64 zfs-initramfs dosfstools
 echo "REMAKE_INITRD=yes" > /etc/dkms/zfs.conf
-
 systemctl enable zfs.target
 systemctl enable zfs-import-cache
 systemctl enable zfs-mount
 systemctl enable zfs-import.target
-
 echo "UMASK=0077" > /etc/initramfs-tools/conf.d/umask.conf
 update-initramfs -c -k all
-
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
 }
-
 mk_arch_finish () {
 cat << EOF >> /mnt/finish.sh
 #!/bin/sh
+passwd
 ln -sf /usr/share/zoneinfo/Region/City /etc/localtime
 hwclock --systohc
 printf 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
@@ -252,24 +249,21 @@ locale-gen
 printf 'LANG=en_US.UTF-8' >> /etc/locale.conf
 touch /etc/vconsole.conf
 mkinitcpio -P
-passwd
+zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
 }
-
 mk_alpine_finish () {
  
 # breaking indent for cat EOF
 cat <<EOF > /mnt/finish.sh
 passwd
-
 rc-update add hwdrivers sysinit
 rc-update add networking
 rc-update add hostname
-
 apk add zfs zfs-lts curl efibootmgr
 rc-update add zfs-import sysinit
 rc-update add zfs-mount sysinit
-
 echo "/etc/hostid" >> /etc/mkinitfs/features.d/zfshost.files
 echo "/etc/zfs/zroot.key" >> /etc/mkinitfs/features.d/zfshost.files
 echo 'features="ata base keymap kms mmc scsi usb virtio nvme zfs zfshost"' > /etc/mkinitfs/mkinitfs.conf
