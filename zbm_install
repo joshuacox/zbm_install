@@ -115,7 +115,9 @@ zfs_create_pool () {
 
 zfs_import () {
   zpool import -f -N -R /mnt zroot
-  zfs load-key -L prompt zroot
+  if [ $z_encrytion_enable = 'true' ]; then
+    zfs load-key -L prompt zroot
+  fi
 }
 zfs_export () {
   zpool export zroot
