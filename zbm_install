@@ -23,13 +23,15 @@ echo BOOT_DEVICE = ${BOOT_DEVICE}
 echo POOL_DEVICE = ${POOL_DEVICE}
 echo ZHOSTID = ${ZHOSTID}
 
-if [ -z ${SomeKeyphrase} ]; then
-  echo "SomeKeyphrase not defined!"
-  exit 1
-else
-  mkdir -p /etc/zfs
-  echo ${SomeKeyphrase} > /etc/zfs/zroot.key
-  chmod 000 /etc/zfs/zroot.key
+if [ $z_encrytion_enable = 'true' ]; then
+  if [ -z ${SomeKeyphrase} ]; then
+    echo "SomeKeyphrase not defined!"
+    exit 1
+  else
+    mkdir -p /etc/zfs
+    echo ${SomeKeyphrase} > /etc/zfs/zroot.key
+    chmod 000 /etc/zfs/zroot.key
+  fi
 fi
 
 unmounter () {
@@ -37,6 +39,7 @@ unmounter () {
   cut -f2 -d" " /proc/mounts | grep ^/mnt | tac | while read i; do umount -l $i; done
   zpool export zroot
 }
+
 
 alpine_repo_prep () {
 # breaking indent for cat EOF
@@ -88,14 +91,21 @@ blk_stuff () {
 }
 
 zfs_create_pool () {
+  if [ $z_encrytion_enable = 'true' ]; then
+    KEY_LOCATION_OPT='-O keylocation=file:///etc/zfs/zroot.key'
+    KEY_FORMAT_OPT='-O keyformat=passphrase'
+  else
+    KEY_LOCATION_OPT=' '
+    KEY_FORMAT_OPT=' '
+  fi
   zpool create -f -o ashift=12 \
     -O compression=zstd \
     -O acltype=posixacl \
     -O xattr=sa \
     -O relatime=on \
     -O encryption=aes-256-gcm \
-    -O keylocation=file:///etc/zfs/zroot.key \
-    -O keyformat=passphrase \
+    ${KEY_LOCATION_OPT} \
+    ${KEY_FORMAT_OPT} \
     -o autotrim=on \
     -o compatibility=openzfs-2.1-linux \
     -m none zroot "${POOL_DEVICE}"
@@ -152,7 +162,9 @@ deb-src http://deb.debian.org/debian bookworm-backports main non-free non-free-f
 EOF
   fi
   mkdir -p /mnt/etc/zfs
-  cp /etc/zfs/zroot.key /mnt/etc/zfs
+  if [ $z_encrytion_enable = 'true' ]; then
+    cp /etc/zfs/zroot.key /mnt/etc/zfs
+  fi
 # breaking indent for cat EOF
 cat << EOF >> /mnt/etc/fstab
 ${BOOT_DEVICE} /boot/efi vfat defaults 0 0
@@ -239,23 +251,93 @@ zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
 }
 mk_arch_finish () {
+cp /etc/pacman.conf /mnt/etc/pacman.conf
+tee -a /mnt/etc/pacman.d/mirrorlist-archzfs <<- 'EOF'
+## See https://github.com/archzfs/archzfs/wiki
+## France
+#,Server = https://archzfs.com/$repo/$arch
+
+## Germany
+#,Server = https://mirror.sum7.eu/archlinux/archzfs/$repo/$arch
+#,Server = https://mirror.biocrafting.net/archlinux/archzfs/$repo/$arch
+
+## India
+#,Server = https://mirror.in.themindsmaze.com/archzfs/$repo/$arch
+
+## United States
+#,Server = https://zxcvfdsa.com/archzfs/$repo/$arch
+EOF
+
+tee -a /mnt/etc/pacman.conf <<- 'EOF'
+
+#[archzfs-testing]
+#Include = /etc/pacman.d/mirrorlist-archzfs
+
+#,[archzfs]
+#,Include = /etc/pacman.d/mirrorlist-archzfs
+EOF
 cat << EOF >> /mnt/finish.sh
 #!/bin/sh
 passwd
+pacman-key --init
+pacman-key --refresh-keys
+pacman-key --populate
 ln -sf /usr/share/zoneinfo/Region/City /etc/localtime
 hwclock --systohc
 printf 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
 locale-gen
 printf 'LANG=en_US.UTF-8' >> /etc/locale.conf
 touch /etc/vconsole.conf
+
+curl --fail-early --fail -L https://archzfs.com/archzfs.gpg \
+|  pacman-key -a - --gpgdir /etc/pacman.d/gnupg
+
+pacman-key \
+--lsign-key \
+--gpgdir /etc/pacman.d/gnupg \
+DDF7DB817396A49B2A2723F7403BD972F75D9D76
+
+# this #, prefix is a workaround for ci/cd tests
+# remove them
+sed -i 's|#,||' /etc/pacman.d/mirrorlist-archzfs
+sed -i 's|#,||' /etc/pacman.conf
+
+# this one was wrecking my mirrorlist file, but the mirrorlist file is otherwise untouched commenting for now
+# sed -i 's|^#||' /etc/pacman.d/mirrorlist
+
+pacman -Syu --noconfirm
+pacman -S --noconfirm mg mandoc efibootmgr mkinitcpio
+
+kernel_compatible_with_zfs="$(pacman -Si zfs-linux \
+| grep 'Depends On' \
+| sed "s|.*linux=||" \
+| awk '{ print $1 }')"
+pacman -U --noconfirm https://america.archive.pkgbuild.com/packages/l/linux/linux-"${kernel_compatible_with_zfs}"-x86_64.pkg.tar.zst
+
+pacman -S --noconfirm zfs-linux zfs-utils
+
+systemctl enable zfs.target
+systemctl enable zfs-import-cache
+systemctl enable zfs-mount
+systemctl enable zfs-import.target
+
 mkinitcpio -P
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+EOF
+cat <<EOF >> /mnt/finish.sh
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
 }
-mk_alpine_finish () {
  
+mk_alpine_finish () {
 # breaking indent for cat EOF
+if [ $z_encrytion_enable = 'true' ]; then
+  echo "/etc/zfs/zroot.key" >> /mnt/etc/mkinitfs/features.d/zfshost.files
+fi
+if [ -f /mnt/finish.sh ]; then 
+  echo "/mnt/finish.sh exists already"
+  exit 1
+else
 cat <<EOF > /mnt/finish.sh
 passwd
 rc-update add hwdrivers sysinit
@@ -265,12 +347,16 @@ apk add zfs zfs-lts curl efibootmgr
 rc-update add zfs-import sysinit
 rc-update add zfs-mount sysinit
 echo "/etc/hostid" >> /etc/mkinitfs/features.d/zfshost.files
-echo "/etc/zfs/zroot.key" >> /etc/mkinitfs/features.d/zfshost.files
 echo 'features="ata base keymap kms mmc scsi usb virtio nvme zfs zfshost"' > /etc/mkinitfs/mkinitfs.conf
 mkinitfs -c /etc/mkinitfs/mkinitfs.conf "$(ls /mnt/lib/modules)"
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+EOF
+fi
+if [ $z_encrytion_enable = 'true' ]; then
+cat <<EOF >> /mnt/finish.sh
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
+fi
 }
 
 efi_boot_mgr_setup () {
@@ -308,9 +394,9 @@ repo_check
 # blk_stuff
 # zfs_create_pool
 # zfs_export
-# zfs_import
+zfs_import
 # zfs_create_mounts
-# do_mounts
+do_mounts
 # install_os
 # prep_chroot
 # mk_chooser_finish
