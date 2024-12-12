@@ -1,13 +1,17 @@
 #!/bin/sh
 set -eu
-. .env
+source $(pwd)/.env
 source /etc/os-release
 export ID
 if   [ ${ID} = 'alpine' ]; then
   this_chroot_bin="chroot"
+elif [ ${ID} = 'void' ]; then
+  this_chroot_bin="xchroot"
 elif [ ${ID} = 'arch' ]; then
   this_chroot_bin="arch-chroot"
 elif [ ${ID} = 'debian' ]; then
+  this_chroot_bin="chroot"
+elif [ ${ID} = 'ubuntu' ]; then
   this_chroot_bin="chroot"
 fi
 
@@ -23,7 +27,7 @@ echo BOOT_DEVICE = ${BOOT_DEVICE}
 echo POOL_DEVICE = ${POOL_DEVICE}
 echo ZHOSTID = ${ZHOSTID}
 
-if [ $z_encrytion_enable = 'true' ]; then
+if [ $z_encryption_enable = 'true' ]; then
   if [ -z ${SomeKeyphrase} ]; then
     echo "SomeKeyphrase not defined!"
     exit 1
@@ -53,6 +57,11 @@ EOF
   modprobe zfs
 }
 
+noble_numbat_repo_prep () {
+  apt update
+  apt install -yq debootstrap gdisk zfsutils-linux
+}
+
 debian_repo_prep () {
 # breaking indent for cat EOF
 cat <<EOF > /etc/apt/sources.list
@@ -67,11 +76,15 @@ EOF
 repo_check () {
   if   [ ${ID} = 'alpine' ]; then
     alpine_repo_prep
+  elif [ ${ID} = 'void' ]; then
+    echo 'void'
   elif [ ${ID} = 'arch' ]; then
     pacman -Sy
     curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
   elif [ ${ID} = 'debian' ]; then
     debian_repo_prep
+  elif [ ${ID} = 'ubuntu' ]; then
+    noble_numbat_repo_prep
   fi
 }
 
@@ -91,7 +104,7 @@ blk_stuff () {
 }
 
 zfs_create_pool () {
-  if [ $z_encrytion_enable = 'true' ]; then
+  if [ $z_encryption_enable = 'true' ]; then
     KEY_LOCATION_OPT='-O keylocation=file:///etc/zfs/zroot.key'
     KEY_FORMAT_OPT='-O keyformat=passphrase'
   else
@@ -115,7 +128,7 @@ zfs_create_pool () {
 
 zfs_import () {
   zpool import -f -N -R /mnt zroot
-  if [ $z_encrytion_enable = 'true' ]; then
+  if [ $z_encryption_enable = 'true' ]; then
     zfs load-key -L prompt zroot
   fi
 }
@@ -145,8 +158,9 @@ mkfs_and_mount_boot () {
 
 copy_install_dirs () {
   zgenhostid -f ${ZHOSTID}
-  cp /etc/hostid /mnt/etc
-  cp /etc/resolv.conf /mnt/etc
+  mkdir -p /mnt/etc
+  cp /etc/hostid /mnt/etc/
+  cp /etc/resolv.conf /mnt/etc/
   if   [ ${ID} = 'alpine' ]; then
     cp /etc/apk/repositories /mnt/etc/apk
     cp /etc/network/interfaces /mnt/etc/network
@@ -162,9 +176,21 @@ deb-src http://deb.debian.org/debian bookworm-updates main non-free non-free-fir
 deb http://deb.debian.org/debian bookworm-backports main non-free non-free-firmware contrib
 deb-src http://deb.debian.org/debian bookworm-backports main non-free non-free-firmware contrib
 EOF
+  elif [ ${ID} = 'ubuntu' ]; then
+# breaking indent for cat EOF
+cat <<EOF > /mnt/etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse
+EOF
   fi
   mkdir -p /mnt/etc/zfs
-  if [ $z_encrytion_enable = 'true' ]; then
+  if [ $z_encryption_enable = 'true' ]; then
     cp /etc/zfs/zroot.key /mnt/etc/zfs
   fi
 # breaking indent for cat EOF
@@ -177,19 +203,35 @@ install_os () {
   mount | grep mnt
   if   [ ${ID} = 'alpine' ]; then
     alpine_install
+  elif [ ${ID} = 'void' ]; then
+    void_install
   elif [ ${ID} = 'arch' ]; then
     arch_install
   elif [ ${ID} = 'debian' ]; then
     debian_install
+  elif [ ${ID} = 'ubuntu' ]; then
+    noble_numbat_install
   fi
   copy_install_dirs
   echo "${YOURHOSTNAME}" > /mnt/etc/hostname
   echo -e "127.0.1.1\t${YOURHOSTNAME}" >> /mnt/etc/hosts
 }
 
+noble_numbat_install () {
+  udevadm trigger
+  debootstrap noble /mnt
+}
+
 debian_install () {
   udevadm trigger
   debootstrap bookworm /mnt
+}
+
+void_install () {
+  udevadm trigger
+  XBPS_ARCH=x86_64 xbps-install \
+    -S -R https://mirrors.servercentral.com/voidlinux/current \
+    -r /mnt base-system
 }
 
 arch_install () {
@@ -203,6 +245,14 @@ alpine_install () {
    -U --allow-untrusted \
    --root /mnt \
    --initdb add alpine-base
+}
+
+noble_numbat_prep_chroot () {
+  mount -t proc proc /mnt/proc
+  mount -t sysfs sys /mnt/sys
+  mount -B /dev /mnt/dev
+  mount -t devpts pts /mnt/dev/pts
+  #chroot /mnt /bin/bash
 }
 
 debian_prep_chroot () {
@@ -228,14 +278,38 @@ prep_chroot () {
     echo 'skipping as arch has arch-chroot'
   elif [ ${ID} = 'debian' ]; then
     debian_prep_chroot
+  elif [ ${ID} = 'ubuntu' ]; then
+    noble_numbat_prep_chroot
   fi
 }
 
-mk_debian_finish () {
-
+mk_noble_numbat_finish () {
 # breaking indent for cat EOF
 cat <<EOF > /mnt/finish.sh
 #!/bin/bash
+set -eux
+passwd
+apt-get update
+apt install -yq linux-generic locales keyboard-configuration console-setup curl zfsutils-linux vim
+dpkg-reconfigure locales tzdata keyboard-configuration console-setup
+apt install -yq zfs-initramfs dosfstools
+echo "REMAKE_INITRD=yes" > /etc/dkms/zfs.conf
+systemctl enable zfs.target
+systemctl enable zfs-import-cache
+systemctl enable zfs-mount
+systemctl enable zfs-import.target
+echo "UMASK=0077" > /etc/initramfs-tools/conf.d/umask.conf
+update-initramfs -c -k all
+zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
+EOF
+}
+
+mk_debian_finish () {
+# breaking indent for cat EOF
+cat <<EOF > /mnt/finish.sh
+#!/bin/bash
+set -eux
 passwd
 apt-get update
 apt install -yq locales keyboard-configuration console-setup curl
@@ -252,6 +326,7 @@ zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
 EOF
 }
+
 mk_arch_finish () {
 cp /etc/pacman.conf /mnt/etc/pacman.conf
 tee -a /mnt/etc/pacman.d/mirrorlist-archzfs <<- 'EOF'
@@ -333,14 +408,13 @@ EOF
  
 mk_alpine_finish () {
 # breaking indent for cat EOF
-if [ $z_encrytion_enable = 'true' ]; then
-  echo "/etc/zfs/zroot.key" >> /mnt/etc/mkinitfs/features.d/zfshost.files
-fi
 if [ -f /mnt/finish.sh ]; then 
   echo "/mnt/finish.sh exists already"
   exit 1
 else
 cat <<EOF > /mnt/finish.sh
+#!/bin/bash
+set -eux
 passwd
 rc-update add hwdrivers sysinit
 rc-update add networking
@@ -354,23 +428,64 @@ mkinitfs -c /etc/mkinitfs/mkinitfs.conf "$(ls /mnt/lib/modules)"
 zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
 EOF
 fi
-if [ $z_encrytion_enable = 'true' ]; then
+if [ $z_encryption_enable = 'true' ]; then
 cat <<EOF >> /mnt/finish.sh
 zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
+echo "/etc/zfs/zroot.key" >> /etc/mkinitfs/features.d/zfshost.files
 EOF
 fi
 }
 
 efi_boot_mgr_setup () {
+cat <<EOF >> /mnt/efibootmgr.sh
   mkdir -p /boot/efi/EFI/ZBM
   curl -o /boot/efi/EFI/ZBM/VMLINUZ.EFI -L https://get.zfsbootmenu.org/efi
   cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
-  echo efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
-    -L "ZFSBootMenu (Backup)" \
+  efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
+    -L "XZFSBootMenu (Backup)" \
     -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
-  echo efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
-    -L "ZFSBootMenu" \
+  efibootmgr -c -d "${BOOT_DISK}" -p "${BOOT_PART}" \
+    -L "XZFSBootMenu" \
     -l '\EFI\ZBM\VMLINUZ.EFI'
+EOF
+}
+
+mk_void_finish () {
+cat << EOF >> /mnt/etc/rc.conf
+KEYMAP="us"
+HARDWARECLOCK="UTC"
+EOF
+cat << EOF >> /mnt/etc/default/libc-locales
+en_US.UTF-8 UTF-8
+en_US ISO-8859-1
+EOF
+cat << EOF >> /mnt/etc/dracut.conf.d/zol.conf
+nofsck="yes"
+add_dracutmodules+=" zfs "
+omit_dracutmodules+=" btrfs "
+EOF
+if [ $z_encryption_enable = 'true' ]; then
+cat << EOF >> /mnt/etc/dracut.conf.d/zol.conf
+install_items+=" /etc/zfs/zroot.key "
+EOF
+fi
+cat << EOF >> /mnt/etc/fstab
+$( blkid | grep "$BOOT_DEVICE" | cut -d ' ' -f 2 ) /boot/efi vfat defaults 0 0
+EOF
+
+cat << EOF >> /mnt/finish.sh
+xbps-reconfigure -f glibc-locales
+xbps-install -s zfs
+zfs set org.zfsbootmenu:commandline="quiet" zroot/ROOT
+mkdir -p /boot/efi
+mount /boot/efi
+passwd
+EOF
+if [ $z_encryption_enable = 'true' ]; then
+cat << EOF >> /mnt/finish.sh
+zfs set org.zfsbootmenu:keysource="zroot/ROOT/${ID}" zroot
+EOF
+fi
 }
 
 mk_chooser_finish () {
@@ -378,11 +493,16 @@ mk_chooser_finish () {
   if   [ ${ID} = 'alpine' ]; then
     mk_alpine_finish
     this_chroot_bin="chroot"
+  elif [ ${ID} = 'void' ]; then
+    mk_void_finish
   elif [ ${ID} = 'arch' ]; then
     mk_arch_finish
     this_chroot_bin="arch-chroot"
   elif [ ${ID} = 'debian' ]; then
     mk_debian_finish
+    this_chroot_bin="chroot"
+  elif [ ${ID} = 'ubuntu' ]; then
+    mk_noble_numbat_finish
     this_chroot_bin="chroot"
   fi
   chmod +x /mnt/finish.sh
@@ -390,20 +510,4 @@ mk_chooser_finish () {
   $this_chroot_bin /mnt
 }
 
-set -x
 
-repo_check
-# blk_stuff
-# zfs_create_pool
-# zfs_export
-zfs_import
-# zfs_create_mounts
-do_mounts
-# install_os
-# prep_chroot
-# mk_chooser_finish
-# mkfs_and_mount_boot
-# efi_boot_mgr_setup
-
-# chroot /mnt
-# unmounter
